@@ -62,3 +62,199 @@ dataloaders = {x: torch.utils.data.DataLoader(image_datasets[x], batch_size=batc
 class_names = image_datasets['train'].classes
 
 print(image_datasets)
+
+'''
+读取标签对应的实际名字
+'''
+with open('cat_to_name.json', 'r') as f:
+    cat_to_name = json.load(f)
+print(cat_to_name)
+
+'''加载models中提供的模型，并且直接用训练的好权重当做初始化参数'''
+model_name = 'resnet'  #可选的比较多 ['resnet', 'alexnet', 'vgg', 'squeezenet', 'densenet', 'inception']
+#是否用人家训练好的特征来做
+feature_extract = True #迁移学习，都用人家特征，先不更新
+
+# 是否用GPU训练
+train_on_gpu = torch.cuda.is_available()
+
+if not train_on_gpu:
+    print('CUDA is not available.  Training on CPU ...')
+else:
+    print('CUDA is available!  Training on GPU ...')
+
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
+'''模型参数要不要更新'''
+def set_parameter_requires_grad(model, feature_extracting):
+    if feature_extracting:
+        for param in model.parameters():# 遍历模型的参数
+            param.requires_grad = False #设置反向传播时不更新参数（迁移学习）
+model_ft = models.resnet18()#18层的能快点，条件好点的也可以选152
+model_ft
+
+'''把模型输出层改成自己的分类数'''
+def initialize_model(model_name, num_classes, feature_extract, use_pretrained=True):
+    model_ft = models.resnet18(pretrained=use_pretrained)  # x选用模型，并且采用训练好的参数
+    set_parameter_requires_grad(model_ft, feature_extract)
+
+    num_ftrs = model_ft.fc.in_features  # 找到输出层
+    model_ft.fc = nn.Linear(num_ftrs, num_classes)  # 重写输出层，类别数自己根据自己任务来（这里102）
+
+    input_size = 64  # 输入大小根据自己配置来
+
+    return model_ft, input_size
+
+'''设置哪些层需要训练'''
+model_ft, input_size = initialize_model(model_name, 102, feature_extract, use_pretrained=True)  # 分类数102
+
+# GPU还是CPU计算
+model_ft = model_ft.to(device)
+
+#  模型保存，名字自己起
+filename = 'best.pt'
+
+# 是否训练所有层
+params_to_update = model_ft.parameters()
+print("Params to learn:")
+if feature_extract:
+    params_to_update = []  # 将需要更新的参数放在这个list中，一会交给优化器去更新
+    for name, param in model_ft.named_parameters():
+        if param.requires_grad == True:
+            params_to_update.append(param)
+
+else:
+    for name, param in model_ft.named_parameters():
+        if param.requires_grad == True:
+            print("\t", name)
+
+'''优化器设置'''
+# 优化器设置
+optimizer_ft = optim.Adam(params_to_update, lr=1e-2)#要训练啥参数，你来定
+# 定义学习率衰减策略， step_size 个 epoch 进行一次衰减，衰减策略可以自定义
+scheduler = optim.lr_scheduler.StepLR(optimizer_ft, step_size=10, gamma=0.1)#学习率每7个epoch衰减成原来的1/10
+# 损失函数： 交叉熵，传入的是真实值和预测值
+criterion = nn.CrossEntropyLoss()
+
+'''训练模块'''
+
+
+def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, filename='best.pt'):
+    # 咱们要算时间的
+    since = time.time()
+    # 也要记录最好的那一次
+    best_acc = 0
+    # 模型也得放到你的CPU或者GPU
+    model.to(device)
+    # 训练过程中打印一堆损失和指标
+    val_acc_history = []
+    train_acc_history = []
+    train_losses = []
+    valid_losses = []
+    # 学习率
+    LRs = [optimizer.param_groups[0]['lr']]  # optimizer.param_groups[0] 是一个字典，取出key = 'lr'的数据
+    # 最好的那次模型，后续会变的，先初始化
+    best_model_wts = copy.deepcopy(model.state_dict())
+    # 一个个epoch来遍历
+    for epoch in range(num_epochs):
+        print('Epoch {}/{}'.format(epoch, num_epochs - 1))
+        print('-' * 10)
+
+        # 训练和验证
+        for phase in ['train', 'valid']:
+            if phase == 'train':
+                model.train()  # 训练
+            else:
+                model.eval()  # 验证，验证集没有权重的更新
+
+            running_loss = 0.0
+            running_corrects = 0
+
+            # 把数据都取个遍
+            for inputs, labels in dataloaders[phase]:
+                inputs = inputs.to(device)  # 放到你的CPU或GPU
+                labels = labels.to(device)
+
+                # 梯度清零，每一次梯度更新前，先进行梯度清零
+                optimizer.zero_grad()
+                # 只有训练的时候计算和更新梯度
+                outputs = model(inputs)  # 每个数据的 outputs 就是102*1
+                loss = criterion(outputs, labels)  # 损失函数
+                _, preds = torch.max(outputs, 1)
+                # 训练阶段更新权重
+                if phase == 'train':
+                    loss.backward()  # 反向传播得到梯度更新值
+                    optimizer.step()  # 更新梯度
+
+                # 计算损失
+                running_loss += loss.item() * inputs.size(0)  # 0表示batch那个维度
+                running_corrects += torch.sum(preds == labels.data)  # 预测结果最大的和真实值是否一致
+
+            # 遍历一个dataLoader，算是跑完一个epoch
+            epoch_loss = running_loss / len(dataloaders[phase].dataset)  # 算平均
+            epoch_acc = running_corrects.double() / len(dataloaders[phase].dataset)
+
+            time_elapsed = time.time() - since  # 一个epoch我浪费了多少时间
+            print('Time elapsed {:.0f}m {:.0f}s'.format(time_elapsed // 60, time_elapsed % 60))
+            print('{} Loss: {:.4f} Acc: {:.4f}'.format(phase, epoch_loss, epoch_acc))
+
+            # 得到最好那次的模型
+            if phase == 'valid' and epoch_acc > best_acc:
+                best_acc = epoch_acc
+                best_model_wts = copy.deepcopy(model.state_dict())
+                state = {
+                    'state_dict': model.state_dict(),  # 字典里key就是各层的名字，值就是训练好的权重
+                    'best_acc': best_acc,
+                    'optimizer': optimizer.state_dict(),
+                }
+                torch.save(state, filename)
+            if phase == 'valid':
+                val_acc_history.append(epoch_acc)
+                valid_losses.append(epoch_loss)
+                # scheduler.step(epoch_loss)#学习率衰减
+            if phase == 'train':
+                train_acc_history.append(epoch_acc)
+                train_losses.append(epoch_loss)
+        # 每个epoch 结束打印学习率，并按照学习率的衰减策略衰减
+        print('Optimizer learning rate : {:.7f}'.format(optimizer.param_groups[0]['lr']))
+        LRs.append(optimizer.param_groups[0]['lr'])
+        print()
+        scheduler.step()  # 学习率衰减
+
+    time_elapsed = time.time() - since
+    print('Training complete in {:.0f}m {:.0f}s'.format(time_elapsed // 60, time_elapsed % 60))
+    print('Best val Acc: {:4f}'.format(best_acc))
+
+    # 训练完后用最好的一次当做模型最终的结果,等着一会测试
+    model.load_state_dict(best_model_wts)
+    return model, val_acc_history, train_acc_history, valid_losses, train_losses, LRs
+
+'''开始训练,只训练了输出层'''
+model_ft, val_acc_history, train_acc_history, valid_losses, train_losses, LRs  = train_model(model_ft, dataloaders, criterion, optimizer_ft, num_epochs=40)
+
+'''再继续训练所有层'''
+# for param in model_ft.parameters():
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
