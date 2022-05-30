@@ -230,11 +230,94 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs=25, filenam
     return model, val_acc_history, train_acc_history, valid_losses, train_losses, LRs
 
 '''开始训练,只训练了输出层'''
-model_ft, val_acc_history, train_acc_history, valid_losses, train_losses, LRs  = train_model(model_ft, dataloaders, criterion, optimizer_ft, num_epochs=40)
+model_ft, val_acc_history, train_acc_history, valid_losses, train_losses, LRs  = train_model(model_ft, dataloaders, criterion, optimizer_ft, num_epochs=2)
 
 '''再继续训练所有层'''
-# for param in model_ft.parameters():
+for param in model_ft.parameters():
+    param.requires_grad = True
 
+# 再继续训练所有的参数，学习率调小一点
+optimizer = optim.Adam(model_ft.parameters(), lr=1e-3)
+scheduler = optim.lr_scheduler.StepLR(optimizer_ft, step_size=7, gamma=0.1)
+
+# 损失函数
+criterion = nn.CrossEntropyLoss()
+
+# 加载之前训练好的权重参数
+
+checkpoint = torch.load(filename)
+best_acc = checkpoint['best_acc']
+model_ft.load_state_dict(checkpoint['state_dict'])
+
+model_ft, val_acc_history, train_acc_history, valid_losses, train_losses, LRs  = train_model(model_ft, dataloaders, criterion, optimizer, num_epochs=2)
+
+'''加载训练好的模型'''
+model_ft, input_size = initialize_model(model_name, 102, feature_extract, use_pretrained=True)
+
+# GPU模式
+model_ft = model_ft.to(device)
+
+# 保存文件的名字
+filename='best.pt'
+
+# 加载模型
+checkpoint = torch.load(filename)
+best_acc = checkpoint['best_acc']
+model_ft.load_state_dict(checkpoint['state_dict'])
+
+'''测试数据预处理
+测试数据处理方法需要跟训练时一直才可以
+crop操作的目的是保证输入的大小是一致的
+标准化操作也是必须的，用跟训练数据相同的mean和std,但是需要注意一点训练数据是在0-1上进行标准化，所以测试数据也需要先归一化
+最后一点，PyTorch中颜色通道是第一个维度，跟很多工具包都不一样，需要转换
+
+'''
+
+# 得到一个batch的测试数据
+dataiter = iter(dataloaders['valid'])
+images, labels = dataiter.next()
+
+model_ft.eval()
+
+if train_on_gpu:
+    output = model_ft(images.cuda())
+else:
+    output = model_ft(images)
+
+'''得到概率最大的那个'''
+_, preds_tensor = torch.max(output, 1)
+
+#numpy.squeeze() 从数组的形状中删除单维度条目，即把shape中为1的维度去掉
+preds = np.squeeze(preds_tensor.numpy()) if not train_on_gpu else np.squeeze(preds_tensor.cpu().numpy())
+print(preds)
+
+'''展示预测结果，红色是识别错误的，绿色是识别正确的'''
+
+
+def im_convert(tensor):
+    """ 展示数据"""
+
+    image = tensor.to("cpu").clone().detach()
+    image = image.numpy().squeeze()
+    # Torch 中要求的格式是 channel * H * W, 所以数据如果一开始不是 channel， 先用transpose把channel
+    image = image.transpose(1, 2, 0)
+    # 之前数据的输入是经过标准化的，所以这里再乘以标准差+均值返回
+    image = image * np.array((0.229, 0.224, 0.225)) + np.array((0.485, 0.456, 0.406))
+    image = image.clip(0, 1)# 防止数值越界、异常
+
+    return image
+fig=plt.figure(figsize=(20, 20))
+columns =4
+rows = 2
+
+for idx in range (columns*rows):
+    ax = fig.add_subplot(rows, columns, idx+1, xticks=[], yticks=[])
+    plt.imshow(im_convert(images[idx]))
+    ax.set_title("{} ({})".format(cat_to_name[str(preds[idx])], cat_to_name[str(labels[idx].item())]),
+                 color=("green" if cat_to_name[str(preds[idx])]==cat_to_name[str(labels[idx].item())] else "red"))
+plt.show()
+
+# if __name__ == '__main__':
 
 
 
